@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets — .env.example is the tracked template
+.env
+.env.*
+!.env.example
+
+# Test / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Editors
+.idea/
+.vscode/
+
+# Claude Code local overrides (a shared .claude/settings.json stays tracked)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
