@@ -8,8 +8,8 @@ Every response body below was captured from a live instance, not transcribed fro
 
 ## Conventions
 
-- **Content type** — `application/json` for all requests and responses, except `204`, which has an
-  empty body.
+- **Content type** — `application/json` for all requests and responses, except `POST /items`, which
+  is `multipart/form-data` because it carries the image files, and `204`, which has an empty body.
 - **Timestamps** — ISO 8601, UTC, `Z`-suffixed: `2026-08-24T07:03:11.948765Z`.
 - **IDs** — UUID (v4) strings. A malformed UUID in the path is a `422`, never a `404`.
 - **Authentication** — none. Every endpoint is public.
@@ -31,7 +31,7 @@ Every error shares one shape:
     "code": "validation_error",
     "message": "Request validation failed.",
     "details": [
-      {"type": "missing", "loc": ["body", "category"], "msg": "Field required", "input": {"name": "x"}}
+      {"type": "missing", "loc": ["body", "images"], "msg": "Field required", "input": null}
     ]
   }
 }
@@ -41,7 +41,7 @@ Every error shares one shape:
 |---|---|---|
 | 404 | `not_found` | no item with that id |
 | 409 | `conflict` | defined in `app/core/exceptions.py`, not yet raised anywhere |
-| 422 | `validation_error` | body, query, or path validation failed |
+| 422 | `validation_error` | body, query, or path validation failed, or an upload was rejected |
 | 500 | `internal_error` | unhandled `AppError` |
 
 > **Caveat:** a failure inside the session commit occurs after exception handlers have run, so it
@@ -73,46 +73,85 @@ Use `GET /items` for that.
 
 ### `POST /items`
 
-Request body — `ItemCreate`:
+`multipart/form-data` carrying **only the image files**. There are no item detail fields: an item is
+created from its photos and described afterwards with `PATCH`.
+**At least one image is required** — an item cannot be created without a photo.
 
 | Field | Type | Required | Constraints |
 |---|---|---|---|
-| `name` | string | **yes** | 1–120 chars |
-| `category` | string | **yes** | 1–50 chars, free text (no enum) |
-| `color` | string \| null | no | ≤ 40 chars |
-| `brand` | string \| null | no | ≤ 80 chars |
-| `size` | string \| null | no | ≤ 20 chars |
-| `notes` | string \| null | no | unbounded |
+| `images` | file (repeatable) | **yes** | 1–`IMAGE_MAX_COUNT` files, each ≤ `IMAGE_MAX_BYTES` and of an `IMAGE_ALLOWED_CONTENT_TYPES` type |
+
+`name`, `category`, `color`, `brand`, `size` and `notes` are **not accepted here** and come back `null`.
+Send them to `PATCH /items/{item_id}` once the item exists.
+
+Each file is uploaded to S3 under `items/{item_id}/{image_id}{ext}` before the row is written. The
+bucket stays private: the key is what is stored, and every read presigns a fresh GET URL.
 
 ```bash
-curl -X POST localhost:8000/api/v1/items -H 'Content-Type: application/json' \
-  -d '{"name":"Wool Coat","category":"outerwear","color":"charcoal","brand":"Acme","size":"L","notes":"winter only"}'
+curl -X POST localhost:8000/api/v1/items \
+  -F images=@coat-front.jpg -F images=@coat-back.jpg
 ```
 
-**201** — the full `ItemRead` object. Omitted optional fields come back explicitly `null`:
+**201** — the full `ItemRead` object. Every detail field comes back explicitly `null`, and `images`
+carries one entry per uploaded file, in upload order:
 
 ```json
 {
-  "name": "Wool Coat",
-  "category": "outerwear",
-  "color": "charcoal",
-  "brand": "Acme",
-  "size": "L",
-  "notes": "winter only",
-  "id": "152069c4-e4e5-4d54-bd5c-3360b5b39ce2",
-  "created_at": "2026-08-24T07:03:11.962456Z",
-  "updated_at": "2026-08-24T07:03:11.962456Z"
+  "name": null,
+  "category": null,
+  "color": null,
+  "brand": null,
+  "size": null,
+  "notes": null,
+  "id": "ea899ad1-659c-4b3a-a2d6-1715e6df3943",
+  "created_at": "2026-08-26T10:01:34.166424Z",
+  "updated_at": "2026-08-26T10:01:34.166424Z",
+  "images": [
+    {
+      "id": "e30207dc-6801-4009-8596-168a11fc02fc",
+      "url": "https://lokara-wardrobe.s3.ap-south-1.amazonaws.com/items/ea899ad1-.../e30207dc-....jpg?X-Amz-Algorithm=...&X-Amz-Expires=3600&X-Amz-Signature=...",
+      "content_type": "image/jpeg",
+      "size_bytes": 208,
+      "created_at": "2026-08-26T10:01:34.166424Z"
+    },
+    {
+      "id": "8b9e01fc-e19f-4511-8fe3-f14818c694fd",
+      "url": "https://lokara-wardrobe.s3.ap-south-1.amazonaws.com/items/ea899ad1-.../8b9e01fc-....jpg?X-Amz-Algorithm=...&X-Amz-Expires=3600&X-Amz-Signature=...",
+      "content_type": "image/jpeg",
+      "size_bytes": 208,
+      "created_at": "2026-08-26T10:01:34.166424Z"
+    }
+  ]
 }
 ```
 
+(The two `url` values above are abbreviated; every other value is a live capture. The query string is a
+SigV4 signature that expires after `S3_PRESIGN_EXPIRY_SECONDS` — the URL is not stable and must not be
+persisted by clients.)
+
 `created_at` and `updated_at` are identical on creation.
 
-**422** — missing or invalid fields.
+**422** — missing or invalid fields. Schema failures carry the usual `details` array; upload rules are
+enforced in the service layer and report a plain message instead:
 
-> **Unknown fields are silently ignored.** `{"name":"Y","category":"tops","bogus":1}` returns **201**,
-> with `bogus` discarded and no warning. A client that misspells a field gets a success response and a
-> silently incomplete record. Set `model_config = ConfigDict(extra="forbid")` on `ItemBase` if you want
-> typos rejected.
+```json
+{"error": {"code": "validation_error", "message": "'notes.pdf' is application/pdf; allowed types are image/jpeg, image/png, image/webp."}}
+```
+
+Omitting the `images` part entirely is caught earlier, by FastAPI:
+
+```json
+{"error": {"code": "validation_error", "message": "Request validation failed.",
+ "details": [{"type": "missing", "loc": ["body", "images"], "msg": "Field required", "input": null}]}}
+```
+
+> **Unknown fields are silently ignored.** Extra form fields are discarded with no warning. Since the
+> detail fields moved to `PATCH`, a client still sending `-F name=...` here gets a `201` and an item
+> whose `name` is `null`.
+
+> **A failed upload can orphan objects.** Files are pushed to S3 before the row is written; if the
+> request then fails, the transaction rolls back but the already-uploaded objects stay in the bucket.
+> There is no reaper — an S3 lifecycle rule on unreferenced keys is the usual answer.
 
 ---
 
@@ -139,9 +178,14 @@ curl 'localhost:8000/api/v1/items?category=tops&limit=1&offset=1'
     "brand": null, "size": null, "notes": null,
     "id": "d10cdc83-24b2-4375-9901-11bec4ccb510",
     "created_at": "2026-08-24T07:03:11.948765Z",
-    "updated_at": "2026-08-24T07:03:11.948765Z"
+    "updated_at": "2026-08-24T07:03:11.948765Z",
+    "images": [{"id": "...", "url": "https://...", "content_type": "image/png",
+                "size_bytes": 208, "created_at": "2026-08-24T07:03:11.948765Z"}]
   }
 ]
+
+Every read presigns the URLs of every image it returns, so a large `limit` costs one signing pass per
+image. Signing is local (no S3 round trip), but it is not free.
 ```
 
 An empty result is `[]` with **200**, never 404.
@@ -161,9 +205,9 @@ An empty result is `[]` with **200**, never 404.
 
 ### `PATCH /items/{item_id}`
 
-True partial update — only fields present in the body are applied (`exclude_unset=True`). Every field
-of `ItemCreate` is optional here, with the same length constraints; `name` and `category` remain
-non-empty when supplied.
+True partial update — only fields present in the body are applied (`exclude_unset=True`). Every
+detail field is optional here, with the same length constraints; `name` and `category` remain
+non-empty when supplied. This is the only way to set them — `POST` does not accept them.
 
 ```bash
 curl -X PATCH localhost:8000/api/v1/items/{id} -H 'Content-Type: application/json' -d '{"size":"M"}'
@@ -189,11 +233,18 @@ erases it. There is no way to distinguish "clear this" from "ignore this" other 
 **204** with an empty body on success. **404** if the item does not exist (deletes are not idempotent
 in the "always 204" sense — a second delete returns 404). Hard delete; there is no soft-delete flag.
 
+The item's rows in `item_images` go with it (`ON DELETE CASCADE`), and its objects are deleted from S3
+after the row delete flushes. If that S3 call fails the request 500s and the transaction rolls back, so
+the item survives — the failure mode is a retry, never a row pointing at a deleted object.
+
 ## Response object — `ItemRead`
 
 ```
-name, category, color, brand, size, notes, id, created_at, updated_at
+name, category, color, brand, size, notes, id, created_at, updated_at, images[]
 ```
+
+Each entry of `images` is an `ItemImageRead`: `id`, `url`, `content_type`, `size_bytes`, `created_at`.
+`url` is **derived, not stored** — it is presigned per response and expires.
 
 Serialization order follows the schema's inheritance (`ItemBase` fields first, then `id` and the
 timestamps). Nullable fields are always present and explicitly `null` — never omitted.
@@ -209,3 +260,7 @@ timestamps). Nullable fields are always present and explicitly `null` — never 
   is exact-match.
 - **No sorting or search parameters** — order is fixed at `created_at DESC`.
 - **`409 conflict` is defined but unreachable**; nothing raises `ConflictError` yet.
+- **Images are write-once.** They can only be attached at creation: `PATCH` ignores them and there is no
+  endpoint to add, replace, reorder, or remove an individual image.
+- **Uploads are buffered in memory.** Each file is read fully before the size check, so the
+  `IMAGE_MAX_BYTES` limit bounds what is stored, not what is received.

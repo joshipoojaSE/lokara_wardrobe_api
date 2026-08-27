@@ -25,6 +25,13 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class ValidationError(AppError):
+    """A rule the schema cannot express (upload size, media type, count)."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "validation_error"
+
+
 def _error(code: str, message: str, status_code: int, **extra: object) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,

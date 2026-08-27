@@ -7,11 +7,12 @@ Everything below was verified against a live database at revision `ccb99601b904`
 
 ## Current schema
 
-Two tables: `wardrobe_items` (application data) and `alembic_version` (migration bookkeeping).
+Three tables: `wardrobe_items` and `item_images` (application data) and `alembic_version` (migration
+bookkeeping).
 
-**There are no relationships yet** — no foreign keys exist anywhere in the schema. The only constraints
-are the two primary keys. See [Adding the first relationship](#adding-the-first-relationship) before
-introducing one, since async SQLAlchemy has a trap there.
+One relationship exists: `item_images.item_id` → `wardrobe_items.id`, `ON DELETE CASCADE`. It follows
+the rules in [Adding the first relationship](#adding-the-first-relationship) — eager loading and a
+database-enforced delete rule.
 
 ### `wardrobe_items`
 
@@ -20,8 +21,8 @@ Defined by `app/models/item.py` plus the mixins in `app/db/base.py`.
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
 | `id` | `uuid` | not null | — | PK, generated in Python (`uuid4`) |
-| `name` | `varchar(120)` | not null | — | indexed |
-| `category` | `varchar(50)` | not null | — | indexed, free-text (no enum/FK) |
+| `name` | `varchar(120)` | null | — | indexed; null until set via `PATCH` |
+| `category` | `varchar(50)` | null | — | indexed, free-text (no enum/FK); null until set via `PATCH` |
 | `color` | `varchar(40)` | null | — | |
 | `brand` | `varchar(80)` | null | — | |
 | `size` | `varchar(20)` | null | — | |
@@ -40,6 +41,34 @@ ix_wardrobe_items_name       btree (name)
 `category` is indexed because it is the only filter the list endpoint exposes. `name` is indexed
 ahead of search. Note that list results are ordered by `created_at DESC`, which is **not** indexed —
 fine at current scale, but the first thing to add if listing slows down.
+
+### `item_images`
+
+Defined by `app/models/image.py`. One row per image uploaded with an item.
+
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | `uuid` | not null | — | PK, generated in Python (`uuid4`); also names the S3 object |
+| `item_id` | `uuid` | not null | — | FK → `wardrobe_items.id`, `ON DELETE CASCADE`, indexed |
+| `s3_key` | `varchar(512)` | not null | — | unique; `items/{item_id}/{image_id}{ext}` |
+| `content_type` | `varchar(100)` | not null | — | as sent by the client, restricted to the allowed list |
+| `size_bytes` | `integer` | not null | — | byte length of the uploaded file |
+| `position` | `integer` | not null | — | upload order; the relationship's `order_by` |
+| `created_at` | `timestamptz` | not null | `now()` | |
+| `updated_at` | `timestamptz` | not null | `now()` | |
+
+Indexes:
+
+```
+item_images_pkey          UNIQUE btree (id)
+item_images_s3_key_key    UNIQUE btree (s3_key)
+ix_item_images_item_id    btree (item_id)
+```
+
+**The bucket is not transactional.** Objects are written before the row and deleted after it, so a
+rolled-back request can leave an unreferenced object behind. The database is the source of truth about
+which objects matter; unreferenced keys need an S3 lifecycle rule to clean up. No URL is stored — only
+the key — so rotating buckets or regions is a config change, not a data migration.
 
 ### `alembic_version`
 

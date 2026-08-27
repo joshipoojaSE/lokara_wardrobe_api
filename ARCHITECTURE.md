@@ -52,8 +52,9 @@ proving anything about production.
 
 ```
 HTTP ─▶ Route ─▶ Service ─▶ Repository ─▶ Model ─▶ PostgreSQL
-        schemas   domain      SQLAlchemy   table
-                  errors      queries
+        schemas   domain   │  SQLAlchemy   table
+                  errors   │  queries
+                           └▶ Storage ─▶ S3
 ```
 
 Each layer talks only to the one below it. The constraint is what gives the structure value:
@@ -63,14 +64,19 @@ Each layer talks only to the one below it. The constraint is what gives the stru
 | Route | `app/api/v1/routes/` | HTTP shape, status codes, query params | ORM models, `AsyncSession` |
 | Service | `app/services/` | business rules, domain errors | HTTP, `HTTPException`, FastAPI |
 | Repository | `app/repositories/` | queries, persistence | Pydantic schemas, HTTP |
+| Storage | `app/storage/` | S3 objects: put, delete, presign | Pydantic schemas, HTTP, ORM models |
 | Model | `app/models/` | table definition | everything above |
 
 Wiring happens in `app/api/deps.py`, which is the only place the layers are assembled:
 
 ```python
-DbSession      = Annotated[AsyncSession, Depends(get_session)]
-ItemServiceDep = Annotated[ItemService, Depends(get_item_service)]   # ItemService(ItemRepository(session))
+DbSession        = Annotated[AsyncSession, Depends(get_session)]
+ImageStorageDep  = Annotated[ImageStorage, Depends(get_image_storage)]  # cached S3ImageStorage
+ItemServiceDep   = Annotated[ItemService, Depends(get_item_service)]    # ItemService(ItemRepository(session), storage)
 ```
+
+`ImageStorage` is a `Protocol`, so the service depends on the capability rather than on boto3; tests
+override `get_image_storage` with an in-memory fake and never reach the network.
 
 Routes declare `service: ItemServiceDep` and never see a session. Adding a resource means one file
 per layer, one alias in `deps.py`, one `include_router` line in `app/api/v1/router.py`.
@@ -182,6 +188,11 @@ Tests never rely on that pool — they override `get_session` entirely.
 `WardrobeItem` composes two mixins from `app/db/base.py`: `UUIDMixin` (uuid4 primary key) and
 `TimestampMixin` (`created_at`, `updated_at`, both `timestamptz`, defaulted and updated by the
 database via `now()`).
+
+`ItemImage` composes the same two mixins and hangs off `WardrobeItem.images` — the only relationship in
+the schema. It is `lazy="selectin"`, not the default: async attribute access cannot emit an implicit
+SELECT, so a lazy relationship would raise `MissingGreenlet` from whichever code path happened to touch
+it first. The row stores the S3 **key**; the presigned URL the API returns is derived per response.
 
 `sort_order` on the mixin columns (`-100` for `id`, `100` for timestamps) controls position in
 generated DDL — without it, inherited columns land after the model's own, and every migration reads

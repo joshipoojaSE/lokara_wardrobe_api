@@ -1,9 +1,11 @@
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.image import ItemImage
 from app.models.item import WardrobeItem
 
 
@@ -25,8 +27,10 @@ class ItemRepository:
         result = await self.session.execute(stmt.limit(limit).offset(offset))
         return list(result.scalars().all())
 
-    async def create(self, data: dict[str, Any]) -> WardrobeItem:
-        item = WardrobeItem(**data)
+    async def create(
+        self, data: dict[str, Any], images: Sequence[dict[str, Any]] = ()
+    ) -> WardrobeItem:
+        item = WardrobeItem(**data, images=[ItemImage(**image) for image in images])
         self.session.add(item)
         await self.session.flush()
         await self.session.refresh(item)

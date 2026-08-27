@@ -20,6 +20,8 @@ python -m venv .venv
 
 # 2. configuration
 cp .env.example .env
+# then fill in S3_BUCKET / S3_REGION / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY:
+# item creation uploads images and fails without a reachable bucket.
 
 # 3. start PostgreSQL
 docker compose up -d
@@ -51,8 +53,12 @@ dev/prod parity.
 ## Usage
 
 ```bash
-# create
-curl -X POST localhost:8000/api/v1/items -H 'Content-Type: application/json' \
+# create — multipart/form-data; images only, at least one file required
+curl -X POST localhost:8000/api/v1/items \
+  -F images=@coat-front.jpg -F images=@coat-back.jpg
+
+# describe it — details are set after creation, never at POST
+curl -X PATCH localhost:8000/api/v1/items/{id} -H 'Content-Type: application/json' \
   -d '{"name":"Wool Coat","category":"outerwear","color":"charcoal"}'
 
 # list (newest first; filter and paginate)
@@ -114,6 +120,12 @@ All settings come from environment variables or `.env` (see `.env.example`).
 |---|---|---|
 | `DATABASE_URL` | local Postgres | **the only thing that differs between environments** |
 | `TEST_DATABASE_URL` | `..._test` | dropped and recreated by the test suite |
+| `S3_BUCKET`, `S3_REGION` | `lokara-wardrobe`, `ap-south-1` | where item images are stored |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | unset | omit to fall back to the ambient AWS credential chain (IAM role, profile) |
+| `S3_ENDPOINT_URL` | unset | set for MinIO / LocalStack |
+| `S3_PRESIGN_EXPIRY_SECONDS` | `3600` | lifetime of the image URLs in responses |
+| `IMAGE_MAX_BYTES`, `IMAGE_MAX_COUNT` | `5242880`, `8` | per-file and per-request upload limits |
+| `IMAGE_ALLOWED_CONTENT_TYPES` | jpeg, png, webp | JSON array; anything else is a 422 |
 | `API_V1_PREFIX` | `/api/v1` | route prefix |
 | `CORS_ORIGINS` | `["*"]` | restrict before deploying |
 | `DEBUG` | `false` | log verbosity only |
@@ -143,6 +155,7 @@ app/
 ├── models/              SQLAlchemy ORM models
 ├── schemas/             Pydantic request/response models
 ├── repositories/        queries; never commits
+├── storage/             S3 object storage behind an ImageStorage Protocol
 ├── services/            business rules; no HTTP knowledge
 └── api/
     ├── deps.py          dependency wiring (the only place layers are assembled)
@@ -156,6 +169,7 @@ Requests flow strictly downward, each layer knowing only the one below it:
 
 ```
 HTTP ─▶ Route ─▶ Service ─▶ Repository ─▶ Model ─▶ PostgreSQL
+                     └────▶ Storage ────────────▶ S3
 ```
 
 Two invariants hold this together: `get_session()` is the **only** thing that commits, and services

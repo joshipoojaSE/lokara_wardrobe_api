@@ -20,6 +20,22 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://postgres:postgres@localhost:5432/lokara_wardrobe_test"
     )
 
+    # S3 image storage. The bucket stays private; reads go through presigned URLs.
+    s3_bucket: str = "lokara-wardrobe"
+    s3_region: str = "ap-south-1"
+    s3_endpoint_url: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    s3_presign_expiry_seconds: int = 3600
+
+    image_max_bytes: int = 50 * 1024 * 1024 
+    image_max_count: int = 8
+    image_allowed_content_types: list[str] = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    ]
+
 
 @lru_cache
 def get_settings() -> Settings:
