@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.analysis import ItemAnalysis
 from app.models.image import ItemImage
 from app.models.item import WardrobeItem
 
@@ -39,6 +40,19 @@ class ItemRepository:
     async def update(self, item: WardrobeItem, data: dict[str, Any]) -> WardrobeItem:
         for field, value in data.items():
             setattr(item, field, value)
+        await self.session.flush()
+        await self.session.refresh(item)
+        return item
+
+    async def set_analysis(
+        self, item: WardrobeItem, data: dict[str, Any]
+    ) -> WardrobeItem:
+        """Write the item's analysis row, replacing any earlier one.
+
+        delete-orphan on the relationship deletes the previous row, so a re-run
+        never leaves two.
+        """
+        item.analysis = ItemAnalysis(**data)
         await self.session.flush()
         await self.session.refresh(item)
         return item

@@ -35,8 +35,17 @@ docker compose up -d
 
 Then open **http://localhost:8000/docs**.
 
-Examples below use `.venv/Scripts/python.exe -m <tool>` (Windows). With the venv activated, or on
-macOS/Linux, `alembic`, `pytest`, and `uvicorn` work directly.
+Examples below use `.venv/Scripts/python.exe -m <tool>`, which works in PowerShell and Git Bash. With
+the venv activated, or on macOS/Linux, `alembic`, `pytest`, and `uvicorn` work directly.
+
+**In `cmd.exe`, swap the slashes.** `cmd` reads a leading `/` as an option switch, so the forward-slash
+form fails with `'.venv' is not recognized as an internal or external command`:
+
+```cmd
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe -m pytest
+```
 
 ### Running the API in Docker instead
 

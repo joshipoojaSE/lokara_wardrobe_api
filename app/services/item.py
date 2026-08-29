@@ -1,14 +1,19 @@
+import logging
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.analysis.base import ItemAnalyzer
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.item import WardrobeItem
 from app.repositories.item import ItemRepository
+from app.schemas.analysis import ItemAnalysisResult
 from app.schemas.item import ItemBase, ItemImageRead, ItemRead, ItemUpdate
 from app.storage.base import ImageStorage, ImageUpload
+
+logger = logging.getLogger(__name__)
 
 _EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
@@ -16,9 +21,15 @@ _EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 class ItemService:
     """Business rules. Knows nothing about HTTP."""
 
-    def __init__(self, repo: ItemRepository, storage: ImageStorage) -> None:
+    def __init__(
+        self,
+        repo: ItemRepository,
+        storage: ImageStorage,
+        analyzer: ItemAnalyzer | None = None,
+    ) -> None:
         self.repo = repo
         self.storage = storage
+        self.analyzer = analyzer
 
     async def get_item(self, item_id: UUID) -> ItemRead:
         return self._to_read(await self._get_model(item_id))
@@ -52,7 +63,10 @@ class ItemService:
                 }
             )
 
-        item = await self.repo.create({"id": item_id}, records)
+        status = "pending" if settings.analysis_enabled else "skipped"
+        item = await self.repo.create(
+            {"id": item_id, "analysis_status": status}, records
+        )
         return self._to_read(item)
 
     async def update_item(self, item_id: UUID, payload: ItemUpdate) -> ItemRead:
@@ -65,6 +79,35 @@ class ItemService:
         keys = [image.s3_key for image in item.images]
         await self.repo.delete(item)
         await self.storage.delete(keys)
+
+    async def analyze_item(self, item_id: UUID) -> ItemRead:
+        """Describe an item with the vision model and store the result.
+
+        Runs after the response has been sent, so it never raises: a failure is
+        recorded on the item as `analysis_status="failed"` and left there for a
+        retry rather than lost in a background stack trace.
+        """
+        item = await self._get_model(item_id)
+        if self.analyzer is None:
+            return self._to_read(item)
+
+        try:
+            images = [
+                await self.storage.download(image.s3_key) for image in item.images
+            ]
+            result = await self.analyzer.analyze(images)
+        except Exception as exc:  # noqa: BLE001 - recorded on the row, not raised
+            logger.warning("analysis failed for item %s", item_id, exc_info=exc)
+            failed = await self.repo.update(
+                item, {"analysis_status": "failed", "analysis_error": str(exc)}
+            )
+            return self._to_read(failed)
+
+        await self.repo.set_analysis(item, result.model_dump())
+        updated = await self.repo.update(
+            item, {"analysis_status": "ready", "analysis_error": None}
+        )
+        return self._to_read(updated)
 
     async def _get_model(self, item_id: UUID) -> WardrobeItem:
         item = await self.repo.get(item_id)
@@ -99,6 +142,13 @@ class ItemService:
             id=item.id,
             created_at=item.created_at,
             updated_at=item.updated_at,
+            analysis_status=item.analysis_status,
+            analysis_error=item.analysis_error,
+            analysis=(
+                ItemAnalysisResult.model_validate(item.analysis)
+                if item.analysis is not None
+                else None
+            ),
             images=[
                 ItemImageRead(
                     id=image.id,

@@ -1,9 +1,9 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Query, UploadFile, status
 
-from app.api.deps import ItemServiceDep
+from app.api.deps import AnalysisRunnerDep, ItemServiceDep
 from app.schemas.item import ItemRead, ItemUpdate
 from app.storage.base import ImageUpload
 
@@ -13,12 +13,19 @@ router = APIRouter(prefix="/items", tags=["items"])
 @router.post("", response_model=ItemRead, status_code=status.HTTP_201_CREATED)
 async def create_item(
     service: ItemServiceDep,
+    background_tasks: BackgroundTasks,
+    run_analysis: AnalysisRunnerDep,
     images: Annotated[list[UploadFile], File(description="One or more image files.")],
 ) -> ItemRead:
     """multipart/form-data carrying the image files and nothing else.
 
     The item is created undescribed — name, category and the rest come back null
     and are filled in with PATCH.
+
+    Once the images are in S3 the response is returned immediately with
+    `analysis_status="pending"`, and a background task runs the OpenAI vision
+    analysis. Poll GET /items/{id} until the status turns `ready` (or `failed`)
+    to pick up the `analysis` object.
     """
     uploads = [
         ImageUpload(
@@ -29,7 +36,10 @@ async def create_item(
         for image in images
         if image.filename
     ]
-    return await service.create_item(uploads)
+    item = await service.create_item(uploads)
+    if item.analysis_status == "pending":
+        background_tasks.add_task(run_analysis, item.id)
+    return item
 
 
 @router.get("", response_model=list[ItemRead])

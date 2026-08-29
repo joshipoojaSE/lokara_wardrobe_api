@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     s3_presign_expiry_seconds: int = 3600
 
+    # Vision analysis. `openai_api_key` may stay unset: the SDK then falls back
+    # to OPENAI_API_KEY in the environment.
+    openai_api_key: str | None = None
+    analysis_enabled: bool = True
+    analysis_model: str = "gpt-5.5"
+    # Reasoning-model only. Blank it out for a non-reasoning model like gpt-4o.
+    analysis_effort: str = "medium"
+    analysis_max_output_tokens: int = 16000
+    analysis_timeout_seconds: float = 180.0
+    # Extra views of the same garment sharpen the read but cost tokens.
+    analysis_max_images: int = 4
+
     image_max_bytes: int = 50 * 1024 * 1024 
     image_max_count: int = 8
     image_allowed_content_types: list[str] = [

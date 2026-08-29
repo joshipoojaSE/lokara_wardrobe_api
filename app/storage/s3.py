@@ -53,6 +53,18 @@ class S3ImageStorage:
             )
         )
 
+    async def download(self, key: str) -> ImageUpload:
+        """Read an object back. The key stands in for the filename."""
+        response = await anyio.to_thread.run_sync(
+            partial(self._client.get_object, Bucket=self.bucket, Key=key)
+        )
+        body = await anyio.to_thread.run_sync(response["Body"].read)
+        return ImageUpload(
+            filename=key,
+            content_type=response.get("ContentType", ""),
+            data=body,
+        )
+
     async def delete(self, keys: Sequence[str]) -> None:
         if not keys:
             return

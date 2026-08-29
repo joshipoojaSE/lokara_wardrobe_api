@@ -32,6 +32,13 @@ class ValidationError(AppError):
     code = "validation_error"
 
 
+class AnalysisError(AppError):
+    """The vision model could not be reached or answered unusably."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "analysis_failed"
+
+
 def _error(code: str, message: str, status_code: int, **extra: object) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,

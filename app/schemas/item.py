@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.analysis import ItemAnalysisResult
+
 
 class ItemBase(BaseModel):
     """The describable fields of an item.
@@ -45,3 +47,8 @@ class ItemRead(ItemBase):
     created_at: datetime
     updated_at: datetime
     images: list[ItemImageRead] = []
+
+    # Filled in by the background vision analysis; null until it succeeds.
+    analysis_status: str = "pending"
+    analysis_error: str | None = None
+    analysis: ItemAnalysisResult | None = None
