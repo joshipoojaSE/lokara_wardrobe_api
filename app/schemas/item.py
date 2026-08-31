@@ -52,3 +52,15 @@ class ItemRead(ItemBase):
     analysis_status: str = "pending"
     analysis_error: str | None = None
     analysis: ItemAnalysisResult | None = None
+
+
+class ItemSearchResult(BaseModel):
+    """One semantic-search hit: the item as usual, plus how well it matched.
+
+    A wrapper rather than a field on `ItemRead`, so the shape of GET /items and
+    GET /items/{id} is untouched.
+    """
+
+    # 1 - cosine distance. 1.0 is an exact match; lower is further away.
+    score: float
+    item: ItemRead

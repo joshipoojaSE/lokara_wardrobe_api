@@ -6,13 +6,19 @@ from uuid import UUID, uuid4
 
 from app.analysis.base import ItemAnalyzer
 from app.core.config import settings
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import EmbeddingError, NotFoundError, ValidationError
 from app.embeddings.base import ItemEmbedder
 from app.embeddings.text import analysis_to_text
 from app.models.item import WardrobeItem
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
-from app.schemas.item import ItemBase, ItemImageRead, ItemRead, ItemUpdate
+from app.schemas.item import (
+    ItemBase,
+    ItemImageRead,
+    ItemRead,
+    ItemSearchResult,
+    ItemUpdate,
+)
 from app.storage.base import ImageStorage, ImageUpload
 
 logger = logging.getLogger(__name__)
@@ -43,6 +49,32 @@ class ItemService:
     ) -> list[ItemRead]:
         items = await self.repo.list(limit=limit, offset=offset, category=category)
         return [self._to_read(item) for item in items]
+
+    async def search_items(
+        self, query: str, *, limit: int, offset: int
+    ) -> list[ItemSearchResult]:
+        """Rank items by how close their analysis sits to a natural-language query.
+
+        The query is embedded with the same model that produced the stored
+        vectors, so both live in one space.
+
+        Unlike `_embed`, an embedding failure is not swallowed here: there the
+        vector is a bonus on top of an analysis worth keeping, whereas here it
+        *is* the request, and an empty result would misreport an outage as "no
+        matches".
+        """
+        text = query.strip()
+        if not text:
+            raise ValidationError("Search query must not be empty.")
+        if self.embedder is None:
+            raise EmbeddingError("Search is unavailable: embeddings are disabled.")
+
+        vector = await self.embedder.embed(text)
+        rows = await self.repo.search_by_embedding(vector, limit=limit, offset=offset)
+        return [
+            ItemSearchResult(score=1.0 - distance, item=self._to_read(item))
+            for item, distance in rows
+        ]
 
     async def create_item(self, images: Sequence[ImageUpload]) -> ItemRead:
         """Create an item from its images. Its details start out null."""

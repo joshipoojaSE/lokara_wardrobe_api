@@ -54,6 +54,7 @@ Every error shares one shape:
 | GET | `/api/v1/health` | 200 | no DB access |
 | POST | `/api/v1/items` | 201 | |
 | GET | `/api/v1/items` | 200 | bare array, no envelope |
+| GET | `/api/v1/items/search` | 200 | semantic search, ranked |
 | GET | `/api/v1/items/{item_id}` | 200 | |
 | PATCH | `/api/v1/items/{item_id}` | 200 | partial update |
 | DELETE | `/api/v1/items/{item_id}` | 204 | empty body |
@@ -192,6 +193,45 @@ An empty result is `[]` with **200**, never 404.
 
 ---
 
+### `GET /items/search`
+
+Finds items by meaning rather than by exact field match: the query is embedded with the same model
+that produced each item's stored analysis vector, and results come back nearest-first.
+
+| Param | Type | Default | Constraints |
+|---|---|---|---|
+| `q` | string | — | required, ≥ 1 char (blank or whitespace-only → 422) |
+| `limit` | integer | 20 | 1–100 (outside → 422) |
+| `offset` | integer | 0 | ≥ 0 |
+
+```
+GET /api/v1/items/search?q=I%20want%20a%20red%20tshirt&limit=20
+```
+
+A **bare JSON array** again, but of a different shape than `GET /items` — each entry wraps an
+`ItemRead` alongside its similarity, so the score never leaks into the plain item endpoints:
+
+```json
+[
+  {"score": 0.87, "item": {"id": "...", "images": ["..."], "analysis": {"...": "..."}}},
+  {"score": 0.61, "item": {"...": "..."}}
+]
+```
+
+`score` is `1 - cosine distance`: `1.0` is an exact match, and it decreases with distance. It is a
+relative ranking signal, not a probability — do not read `0.5` as "50% relevant".
+
+**Only items whose analysis is `ready` *and* carries an embedding can match.** Items still `pending`,
+`failed` or `skipped` have no analysis row, and an analysis whose embedding call failed stored a null
+vector; both are excluded rather than ranked last. An item that never appears in results is usually
+missing a vector, not badly matched — `scripts/backfill_embeddings.py` fills those in.
+
+An empty result is `[]` with **200**. **502** `embedding_failed` if the embedding model cannot be
+reached — the query could not be embedded, so no ranking exists, and this is deliberately *not*
+reported as an empty result.
+
+---
+
 ### `GET /items/{item_id}`
 
 **200** — an `ItemRead`. **404** if no such item. **422** if `item_id` is not a valid UUID:
@@ -258,7 +298,8 @@ timestamps). Nullable fields are always present and explicitly `null` — never 
 - **No pagination metadata**, as above.
 - **`category` is unvalidated free text.** `"tops"` and `"Tops"` are different categories, and filtering
   is exact-match.
-- **No sorting or search parameters** — order is fixed at `created_at DESC`.
+- **No sorting parameters** — `GET /items` order is fixed at `created_at DESC`. Ranked retrieval is
+  its own endpoint (`GET /items/search`), and it takes no `category` or score-threshold filter.
 - **`409 conflict` is defined but unreachable**; nothing raises `ConflictError` yet.
 - **Images are write-once.** They can only be attached at creation: `PATCH` ignores them and there is no
   endpoint to add, replace, reorder, or remove an individual image.

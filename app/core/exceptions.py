@@ -42,9 +42,10 @@ class AnalysisError(AppError):
 class EmbeddingError(AppError):
     """The embedding model could not be reached or returned an unusable vector.
 
-    Always caught in the service — a missing vector costs searchability, not the
-    analysis — so this never reaches a handler. It exists so the failure is
-    labelled as its own thing rather than as `analysis_failed`.
+    Swallowed on the analysis path — a missing vector costs searchability, not
+    the analysis — but raised from search, where the vector is the request and an
+    empty result would misreport an outage as "no matches". Separate from
+    `AnalysisError` so the two failures are never labelled as one.
     """
 
     status_code = status.HTTP_502_BAD_GATEWAY

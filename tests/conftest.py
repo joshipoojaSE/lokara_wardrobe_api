@@ -104,17 +104,23 @@ class FakeItemAnalyzer:
 
 
 class FakeItemEmbedder:
-    """Returns a fixed vector and records the text it was asked to embed."""
+    """Returns a fixed vector and records the text it was asked to embed.
+
+    `vectors` maps an exact input to the vector it should produce, so a test that
+    cares about ranking can place items at known distances. Anything unmapped
+    falls back to the constant, which is all most tests need.
+    """
 
     def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[str] = []
+        self.vectors: dict[str, list[float]] = {}
         self.error = error
 
     async def embed(self, text: str) -> list[float]:
         self.calls.append(text)
         if self.error is not None:
             raise self.error
-        return [0.1] * EMBEDDING_DIMENSIONS
+        return self.vectors.get(text, [0.1] * EMBEDDING_DIMENSIONS)
 
 
 @pytest.fixture(scope="session")

@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, File, Query, UploadFile, status
 
 from app.api.deps import AnalysisRunnerDep, ItemServiceDep
-from app.schemas.item import ItemRead, ItemUpdate
+from app.schemas.item import ItemRead, ItemSearchResult, ItemUpdate
 from app.storage.base import ImageUpload
 
 router = APIRouter(prefix="/items", tags=["items"])
@@ -50,6 +50,28 @@ async def list_items(
     category: str | None = Query(default=None),
 ) -> list[ItemRead]:
     return await service.list_items(limit=limit, offset=offset, category=category)
+
+
+# Declared before /{item_id} on purpose: that path is typed UUID, so a request
+# for /items/search landing there would 422 instead of routing here. FastAPI
+# matches in declaration order.
+@router.get("/search", response_model=list[ItemSearchResult])
+async def search_items(
+    service: ItemServiceDep,
+    q: str = Query(min_length=1, description="Natural-language query."),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> list[ItemSearchResult]:
+    """Find items by meaning rather than by exact field match.
+
+    The query is embedded and compared against each item's stored analysis
+    vector, so "I want a red tshirt" matches a crimson tee whether or not the
+    words line up. Results come back closest-first with a `score` of
+    `1 - cosine distance`.
+
+    Only items whose analysis is `ready` *and* carries an embedding can match.
+    """
+    return await service.search_items(q, limit=limit, offset=offset)
 
 
 @router.get("/{item_id}", response_model=ItemRead)
