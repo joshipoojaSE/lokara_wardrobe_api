@@ -39,6 +39,18 @@ class AnalysisError(AppError):
     code = "analysis_failed"
 
 
+class EmbeddingError(AppError):
+    """The embedding model could not be reached or returned an unusable vector.
+
+    Always caught in the service — a missing vector costs searchability, not the
+    analysis — so this never reaches a handler. It exists so the failure is
+    labelled as its own thing rather than as `analysis_failed`.
+    """
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "embedding_failed"
+
+
 def _error(code: str, message: str, status_code: int, **extra: object) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,

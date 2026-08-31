@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -11,11 +12,17 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.api.deps import get_analysis_runner, get_image_storage, get_item_analyzer
+from app.api.deps import (
+    get_analysis_runner,
+    get_image_storage,
+    get_item_analyzer,
+    get_item_embedder,
+)
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import create_app
+from app.models.analysis import EMBEDDING_DIMENSIONS
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
 from app.services.item import ItemService
@@ -96,10 +103,28 @@ class FakeItemAnalyzer:
         return ANALYSIS_FIXTURE
 
 
+class FakeItemEmbedder:
+    """Returns a fixed vector and records the text it was asked to embed."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self.error = error
+
+    async def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        return [0.1] * EMBEDDING_DIMENSIONS
+
+
 @pytest.fixture(scope="session")
 async def engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(settings.test_database_url)
     async with engine.begin() as conn:
+        # `create_all` cannot render the `vector` column type without this, and
+        # scripts/create_test_db.sh only runs on first volume creation, so the
+        # test database will not already have the extension.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -130,8 +155,16 @@ def analyzer() -> FakeItemAnalyzer:
 
 
 @pytest.fixture
+def embedder() -> FakeItemEmbedder:
+    return FakeItemEmbedder()
+
+
+@pytest.fixture
 async def client(
-    session: AsyncSession, storage: FakeImageStorage, analyzer: FakeItemAnalyzer
+    session: AsyncSession,
+    storage: FakeImageStorage,
+    analyzer: FakeItemAnalyzer,
+    embedder: FakeItemEmbedder,
 ) -> AsyncIterator[AsyncClient]:
     app = create_app()
 
@@ -145,12 +178,13 @@ async def client(
         outer transaction and survive the rollback.
         """
         await ItemService(
-            ItemRepository(session), storage, analyzer
+            ItemRepository(session), storage, analyzer, embedder
         ).analyze_item(item_id)
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_image_storage] = lambda: storage
     app.dependency_overrides[get_item_analyzer] = lambda: analyzer
+    app.dependency_overrides[get_item_embedder] = lambda: embedder
     app.dependency_overrides[get_analysis_runner] = lambda: run_analysis
 
     async with AsyncClient(

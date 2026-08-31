@@ -10,6 +10,8 @@ from app.analysis.base import ItemAnalyzer
 from app.analysis.openai import OpenAIItemAnalyzer
 from app.core.config import settings
 from app.db.session import SessionFactory, get_session
+from app.embeddings.base import ItemEmbedder
+from app.embeddings.openai import OpenAIItemEmbedder
 from app.repositories.item import ItemRepository
 from app.services.item import ItemService
 from app.storage.base import ImageStorage
@@ -52,10 +54,28 @@ def get_item_analyzer() -> ItemAnalyzer | None:
 ItemAnalyzerDep = Annotated[ItemAnalyzer | None, Depends(get_item_analyzer)]
 
 
+@lru_cache
+def get_item_embedder() -> ItemEmbedder | None:
+    """One OpenAI client per process. None when embeddings are switched off."""
+    if not settings.embeddings_enabled:
+        return None
+    return OpenAIItemEmbedder(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        timeout_seconds=settings.embedding_timeout_seconds,
+    )
+
+
+ItemEmbedderDep = Annotated[ItemEmbedder | None, Depends(get_item_embedder)]
+
+
 def get_item_service(
-    session: DbSession, storage: ImageStorageDep, analyzer: ItemAnalyzerDep
+    session: DbSession,
+    storage: ImageStorageDep,
+    analyzer: ItemAnalyzerDep,
+    embedder: ItemEmbedderDep,
 ) -> ItemService:
-    return ItemService(ItemRepository(session), storage, analyzer)
+    return ItemService(ItemRepository(session), storage, analyzer, embedder)
 
 
 ItemServiceDep = Annotated[ItemService, Depends(get_item_service)]
@@ -71,7 +91,10 @@ async def _run_analysis(item_id: UUID) -> None:
     """
     async with SessionFactory() as session:
         service = ItemService(
-            ItemRepository(session), get_image_storage(), get_item_analyzer()
+            ItemRepository(session),
+            get_image_storage(),
+            get_item_analyzer(),
+            get_item_embedder(),
         )
         try:
             await service.analyze_item(item_id)

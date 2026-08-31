@@ -1,6 +1,7 @@
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, Integer, JSON, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -13,6 +14,12 @@ if TYPE_CHECKING:
 # Portable like `sa.Uuid` in app/db/base.py: plain JSON keeps the model usable on
 # SQLite, the variant still renders jsonb on Postgres so the arrays are indexable.
 JsonList = JSON().with_variant(JSONB, "postgresql")
+
+# Width of the `embedding` column. Lives here rather than in settings because
+# changing it needs a migration — a config knob could silently disagree with the
+# column. `text-embedding-3-small` emits 1536 natively, and 1536 stays under
+# pgvector's 2000-dimension ceiling for hnsw/ivfflat indexes.
+EMBEDDING_DIMENSIONS = 1536
 
 
 class ItemAnalysis(UUIDMixin, TimestampMixin, Base):
@@ -59,5 +66,13 @@ class ItemAnalysis(UUIDMixin, TimestampMixin, Base):
     harmonizing_families: Mapped[list[Any]] = mapped_column(JsonList, nullable=False)
     pairing_suggestions: Mapped[list[Any]] = mapped_column(JsonList, nullable=False)
     tags: Mapped[list[Any]] = mapped_column(JsonList, nullable=False)
+
+    # The analysis rendered as text and embedded, for similarity search. Unlike
+    # `sa.Uuid` and `JsonList` above this one is Postgres-only — pgvector has no
+    # SQLite equivalent. Nullable: an embedding failure must not cost the
+    # analysis, so a stored row may legitimately have no vector yet.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS), nullable=True
+    )
 
     item: Mapped["WardrobeItem"] = relationship(back_populates="analysis")

@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # Extra views of the same garment sharpen the read but cost tokens.
     analysis_max_images: int = 4
 
+    # Similarity search. Shares `openai_api_key` with the vision analysis above.
+    # The vector width is not configurable here: it is fixed by the column, as
+    # `EMBEDDING_DIMENSIONS` in app/models/analysis.py.
+    embeddings_enabled: bool = True
+    embedding_model: str = "text-embedding-3-small"
+    embedding_timeout_seconds: float = 30.0
+
     image_max_bytes: int = 50 * 1024 * 1024 
     image_max_count: int = 8
     image_allowed_content_types: list[str] = [

@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 from app.analysis.base import ItemAnalyzer
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
+from app.embeddings.base import ItemEmbedder
+from app.embeddings.text import analysis_to_text
 from app.models.item import WardrobeItem
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
@@ -26,10 +28,12 @@ class ItemService:
         repo: ItemRepository,
         storage: ImageStorage,
         analyzer: ItemAnalyzer | None = None,
+        embedder: ItemEmbedder | None = None,
     ) -> None:
         self.repo = repo
         self.storage = storage
         self.analyzer = analyzer
+        self.embedder = embedder
 
     async def get_item(self, item_id: UUID) -> ItemRead:
         return self._to_read(await self._get_model(item_id))
@@ -103,11 +107,27 @@ class ItemService:
             )
             return self._to_read(failed)
 
-        await self.repo.set_analysis(item, result.model_dump())
+        # Outside the try above on purpose: an embeddings outage must not set
+        # `analysis_status="failed"` and throw away a vision result that cost a
+        # model call to produce.
+        embedding = await self._embed(result)
+        await self.repo.set_analysis(
+            item, result.model_dump() | {"embedding": embedding}
+        )
         updated = await self.repo.update(
             item, {"analysis_status": "ready", "analysis_error": None}
         )
         return self._to_read(updated)
+
+    async def _embed(self, result: ItemAnalysisResult) -> list[float] | None:
+        """Best-effort. A missing vector costs searchability, not the analysis."""
+        if self.embedder is None:
+            return None
+        try:
+            return await self.embedder.embed(analysis_to_text(result))
+        except Exception as exc:  # noqa: BLE001 - logged, the analysis still stores
+            logger.warning("embedding failed for %r", result.title, exc_info=exc)
+            return None
 
     async def _get_model(self, item_id: UUID) -> WardrobeItem:
         item = await self.repo.get(item_id)
