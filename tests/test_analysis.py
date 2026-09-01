@@ -6,10 +6,14 @@ from tests.conftest import ANALYSIS_FIXTURE, FakeImageStorage, FakeItemAnalyzer
 ITEMS = f"{settings.api_v1_prefix}/items"
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+
+_BYTES = {"image/png": PNG, "image/jpeg": JPEG}
 
 
 def image(name: str = "shirt.png", content_type: str = "image/png") -> tuple:
-    return ("images", (name, PNG, content_type))
+    """The bytes match the declared type: the API sniffs rather than trusting."""
+    return ("images", (name, _BYTES[content_type], content_type))
 
 
 async def test_create_item_analyzes_in_the_background(

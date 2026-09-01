@@ -4,9 +4,11 @@ from pathlib import PurePosixPath
 from typing import Any
 from uuid import UUID, uuid4
 
+import anyio.to_thread
+
 from app.analysis.base import ItemAnalyzer
 from app.answers.base import WardrobeAnswerer
-from app.answers.context import hits_to_context
+from app.answers.context import hits_to_context, select_window
 from app.core.config import settings
 from app.core.exceptions import (
     AnswerError,
@@ -16,6 +18,7 @@ from app.core.exceptions import (
 )
 from app.embeddings.base import ItemEmbedder
 from app.embeddings.text import analysis_to_text
+from app.images import normalize_uploads
 from app.models.item import WardrobeItem
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
@@ -96,8 +99,8 @@ class ItemService:
         """Search, then have the model answer *from those results only*.
 
         Retrieval runs first, so the answer can never reach past what the
-        wardrobe actually holds. The model sees the top `answer_context_items`
-        hits and cites them by position.
+        wardrobe actually holds. The model sees `answer_context_items` of the
+        hits — spread across garment types — and cites them by position.
 
         Only the items it picked are returned. Retrieval always yields its
         closest rows whether or not they answer the question, so the unfiltered
@@ -109,7 +112,10 @@ class ItemService:
             raise AnswerError("Answers are unavailable: answering is disabled.")
 
         # Only this window is described to the model, so only it can be cited.
-        window = results[: settings.answer_context_items]
+        # Spread across garment types rather than sliced off the top: an outfit
+        # answer needs a bottom in the prompt even when every closest row is a
+        # top. See `select_window`.
+        window = select_window(results, settings.answer_context_items)
         draft = await self.answerer.answer(query.strip(), hits_to_context(window))
         return ItemSearchResponse(
             answer=draft.answer,
@@ -156,6 +162,11 @@ class ItemService:
     async def create_item(self, images: Sequence[ImageUpload]) -> ItemRead:
         """Create an item from its images. Its details start out null."""
         self._validate_images(images)
+        # Format is decided by the bytes, not the client's Content-Type, and an
+        # unreadable format is transcoded. Both are blocking work, so they run
+        # off the event loop. Deliberately before the id is minted: a bad file
+        # then fails the request without having written anything to S3.
+        images = await anyio.to_thread.run_sync(normalize_uploads, list(images))
 
         # The id is minted here so uploaded objects can be keyed by item before
         # the row exists. If an upload fails, the session rolls back and no row
@@ -252,12 +263,6 @@ class ItemService:
                 f"At most {settings.image_max_count} images may be uploaded at once."
             )
         for upload in images:
-            if upload.content_type not in settings.image_allowed_content_types:
-                allowed = ", ".join(settings.image_allowed_content_types)
-                raise ValidationError(
-                    f"{upload.filename!r} is {upload.content_type or 'untyped'}; "
-                    f"allowed types are {allowed}."
-                )
             if upload.size_bytes == 0:
                 raise ValidationError(f"{upload.filename!r} is empty.")
             if upload.size_bytes > settings.image_max_bytes:
@@ -293,7 +298,12 @@ class ItemService:
 
 
 def _extension_for(upload: ImageUpload) -> str:
+    """The sniffed content type wins; the filename is only a fallback.
+
+    A file named `.jpg` that holds PNG bytes should not key the object `.jpg`.
+    """
+    extension = _EXTENSIONS.get(upload.content_type)
+    if extension is not None:
+        return extension
     suffix = PurePosixPath(upload.filename).suffix.lower()
-    if suffix in _EXTENSIONS.values():
-        return suffix
-    return _EXTENSIONS.get(upload.content_type, "")
+    return suffix if suffix in _EXTENSIONS.values() else ""

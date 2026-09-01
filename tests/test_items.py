@@ -1,6 +1,8 @@
+import io
 from uuid import UUID
 
 from httpx import AsyncClient
+from PIL import Image
 
 from app.core.config import settings
 from tests.conftest import FakeImageStorage
@@ -8,10 +10,16 @@ from tests.conftest import FakeImageStorage
 ITEMS = f"{settings.api_v1_prefix}/items"
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+
+# Signatures only. The API sniffs the leading bytes but never decodes a format
+# it already stores, so these do not have to be openable images.
+_BYTES = {"image/png": PNG, "image/jpeg": JPEG}
 
 
 def image(name: str = "shirt.png", content_type: str = "image/png") -> tuple:
-    return ("images", (name, PNG, content_type))
+    """The bytes match the declared type; a mismatch is its own test below."""
+    return ("images", (name, _BYTES[content_type], content_type))
 
 
 async def test_item_crud_round_trip(
@@ -121,6 +129,68 @@ async def test_create_item_rejects_oversized_upload(
     oversized = b"0" * (settings.image_max_bytes + 1)
     response = await client.post(
         ITEMS, files=[("images", ("huge.png", oversized, "image/png"))]
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert storage.objects == {}
+
+
+def _avif_bytes() -> bytes:
+    """A real AVIF. Written by hand it would be an opaque blob in the repo."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 30, 40)).save(buffer, format="AVIF")
+    return buffer.getvalue()
+
+
+async def test_create_item_converts_avif_to_jpeg(
+    client: AsyncClient, storage: FakeImageStorage
+) -> None:
+    """The bug this guards: browsers label a renamed AVIF `image/jpeg`.
+
+    Stored unconverted, it reached the vision model inside a `data:image/jpeg`
+    URI and OpenAI 400ed on it — long after the upload had returned 201.
+    """
+    avif = _avif_bytes()
+    response = await client.post(
+        ITEMS, files=[("images", ("photo.jpg", avif, "image/jpeg"))]
+    )
+
+    assert response.status_code == 201
+    entry = response.json()["images"][0]
+    assert entry["content_type"] == "image/jpeg"
+
+    (key,) = storage.objects
+    assert key.endswith(".jpg")
+    stored = storage.objects[key]
+    # Really transcoded, not just relabelled.
+    assert stored.data != avif
+    assert stored.data.startswith(b"\xff\xd8\xff")
+    assert Image.open(io.BytesIO(stored.data)).format == "JPEG"
+    assert entry["size_bytes"] == len(stored.data)
+
+
+async def test_create_item_trusts_the_bytes_over_the_declared_type(
+    client: AsyncClient, storage: FakeImageStorage
+) -> None:
+    """A PNG announced as `image/jpeg` is stored as what it actually is."""
+    response = await client.post(
+        ITEMS, files=[("images", ("mislabelled.jpg", PNG, "image/jpeg"))]
+    )
+
+    assert response.status_code == 201
+    assert response.json()["images"][0]["content_type"] == "image/png"
+
+    (key,) = storage.objects
+    assert key.endswith(".png")
+    assert storage.objects[key].data == PNG
+
+
+async def test_create_item_rejects_bytes_that_only_claim_to_be_an_image(
+    client: AsyncClient, storage: FakeImageStorage
+) -> None:
+    response = await client.post(
+        ITEMS, files=[("images", ("shirt.png", b"not an image at all", "image/png"))]
     )
 
     assert response.status_code == 422

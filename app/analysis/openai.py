@@ -110,7 +110,6 @@ class OpenAIItemAnalyzer:
             raise AnalysisError(f"Vision analysis stopped early: {reason}.")
         if response.output_parsed is None:
             raise AnalysisError("Vision analysis returned no structured output.")
-        print(response, "response//////////////////////////////////////")
         usage = response.usage
         logger.info(
             "analyzed item images=%d input_tokens=%s output_tokens=%s",

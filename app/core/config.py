@@ -58,7 +58,12 @@ class Settings(BaseSettings):
     # How many of the retrieved items are rendered into the prompt. More context
     # costs tokens on every answered search and gives the model more near-misses
     # to sift; the answer only ever cites what is in this window.
-    answer_context_items: int = 5
+    #
+    # The window is filled round-robin over garment type, so this is a budget
+    # shared by all six of them: at 12 an outfit question sees roughly two Tops,
+    # two Bottoms and two pairs of Footwear, which is enough to propose a pairing
+    # and an alternative to it. Much lower and one crowded type eats the window.
+    answer_context_items: int = 12
 
     image_max_bytes: int = 50 * 1024 * 1024 
     image_max_count: int = 8
