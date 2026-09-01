@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.base import ItemAnalyzer
 from app.analysis.openai import OpenAIItemAnalyzer
+from app.answers.base import WardrobeAnswerer
+from app.answers.openai import OpenAIWardrobeAnswerer
 from app.core.config import settings
 from app.db.session import SessionFactory, get_session
 from app.embeddings.base import ItemEmbedder
@@ -69,13 +71,33 @@ def get_item_embedder() -> ItemEmbedder | None:
 ItemEmbedderDep = Annotated[ItemEmbedder | None, Depends(get_item_embedder)]
 
 
+@lru_cache
+def get_wardrobe_answerer() -> WardrobeAnswerer | None:
+    """One OpenAI client per process. None when answering is switched off."""
+    if not settings.answers_enabled:
+        return None
+    return OpenAIWardrobeAnswerer(
+        api_key=settings.openai_api_key,
+        model=settings.answer_model,
+        effort=settings.answer_effort,
+        max_output_tokens=settings.answer_max_output_tokens,
+        timeout_seconds=settings.answer_timeout_seconds,
+    )
+
+
+WardrobeAnswererDep = Annotated[WardrobeAnswerer | None, Depends(get_wardrobe_answerer)]
+
+
 def get_item_service(
     session: DbSession,
     storage: ImageStorageDep,
     analyzer: ItemAnalyzerDep,
     embedder: ItemEmbedderDep,
+    answerer: WardrobeAnswererDep,
 ) -> ItemService:
-    return ItemService(ItemRepository(session), storage, analyzer, embedder)
+    return ItemService(
+        ItemRepository(session), storage, analyzer, embedder, answerer
+    )
 
 
 ItemServiceDep = Annotated[ItemService, Depends(get_item_service)]

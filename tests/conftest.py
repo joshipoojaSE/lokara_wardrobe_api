@@ -17,6 +17,7 @@ from app.api.deps import (
     get_image_storage,
     get_item_analyzer,
     get_item_embedder,
+    get_wardrobe_answerer,
 )
 from app.core.config import settings
 from app.db.base import Base
@@ -25,6 +26,7 @@ from app.main import create_app
 from app.models.analysis import EMBEDDING_DIMENSIONS
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
+from app.schemas.answer import AnswerDraft, AnswerPick
 from app.services.item import ItemService
 from app.storage.base import ImageUpload
 
@@ -123,6 +125,29 @@ class FakeItemEmbedder:
         return self.vectors.get(text, [0.1] * EMBEDDING_DIMENSIONS)
 
 
+class FakeWardrobeAnswerer:
+    """Returns a canned draft and records the prompt context it was handed.
+
+    `draft` is writable so a test can make the model cite an out-of-range item
+    and prove the service drops it.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.draft = AnswerDraft(
+            answer="Your Beige Linen Shirt is the closest thing you own.",
+            has_match=True,
+            picks=[AnswerPick(index=1, reason="Closest match in the wardrobe.")],
+        )
+        self.error = error
+
+    async def answer(self, query: str, context: str) -> AnswerDraft:
+        self.calls.append((query, context))
+        if self.error is not None:
+            raise self.error
+        return self.draft
+
+
 @pytest.fixture(scope="session")
 async def engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(settings.test_database_url)
@@ -166,11 +191,17 @@ def embedder() -> FakeItemEmbedder:
 
 
 @pytest.fixture
+def answerer() -> FakeWardrobeAnswerer:
+    return FakeWardrobeAnswerer()
+
+
+@pytest.fixture
 async def client(
     session: AsyncSession,
     storage: FakeImageStorage,
     analyzer: FakeItemAnalyzer,
     embedder: FakeItemEmbedder,
+    answerer: FakeWardrobeAnswerer,
 ) -> AsyncIterator[AsyncClient]:
     app = create_app()
 
@@ -191,6 +222,7 @@ async def client(
     app.dependency_overrides[get_image_storage] = lambda: storage
     app.dependency_overrides[get_item_analyzer] = lambda: analyzer
     app.dependency_overrides[get_item_embedder] = lambda: embedder
+    app.dependency_overrides[get_wardrobe_answerer] = lambda: answerer
     app.dependency_overrides[get_analysis_runner] = lambda: run_analysis
 
     async with AsyncClient(

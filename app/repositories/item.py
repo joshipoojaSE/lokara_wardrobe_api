@@ -20,16 +20,22 @@ class ItemRepository:
         return await self.session.get(WardrobeItem, item_id)
 
     async def search_by_embedding(
-        self, embedding: Sequence[float], *, limit: int, offset: int
+        self, embedding: Sequence[float]
     ) -> list[tuple[WardrobeItem, float]]:
-        """Items nearest the given vector, closest first, with their distance.
+        """Every embedded item, closest first, with its distance.
 
         Ordering is by cosine distance so `ix_item_analysis_embedding` — built
         with `vector_cosine_ops` — is usable; L2 or inner product would not hit it.
 
+        Unpaginated: the caller ranks a whole wardrobe, and an hnsw index is only
+        consulted for the rows an ORDER BY ... LIMIT asks for, so without a LIMIT
+        this is a sequential scan by design. That is the right trade at wardrobe
+        scale; if these tables ever grow past it, the fix is a LIMIT here, not a
+        different index.
+
         The join drops items with no analysis row at all, and the explicit null
-        check drops analyzed items whose embedding call failed: Postgres sorts
-        nulls last but they would still occupy result slots.
+        check drops analyzed items whose embedding call failed — Postgres sorts
+        nulls last, so they would otherwise trail every real hit.
 
         Declared above `list` on purpose — once that name is bound in the class
         body, the `list[...]` in this annotation would resolve to the method.
@@ -40,8 +46,6 @@ class ItemRepository:
             .join(ItemAnalysis, ItemAnalysis.item_id == WardrobeItem.id)
             .where(ItemAnalysis.embedding.is_not(None))
             .order_by(distance)
-            .limit(limit)
-            .offset(offset)
         )
         result = await self.session.execute(stmt)
         return [(item, distance) for item, distance in result.all()]

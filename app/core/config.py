@@ -47,6 +47,19 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_timeout_seconds: float = 30.0
 
+    # Grounded answers over search results. Shares
+    # `openai_api_key` with the two services above.
+    answers_enabled: bool = True
+    answer_model: str = "gpt-5.5"
+    # Reasoning-model only. Blank it out for a non-reasoning model like gpt-4o.
+    answer_effort: str = "low"
+    answer_max_output_tokens: int = 4000
+    answer_timeout_seconds: float = 90.0
+    # How many of the retrieved items are rendered into the prompt. More context
+    # costs tokens on every answered search and gives the model more near-misses
+    # to sift; the answer only ever cites what is in this window.
+    answer_context_items: int = 5
+
     image_max_bytes: int = 50 * 1024 * 1024 
     image_max_count: int = 8
     image_allowed_content_types: list[str] = [

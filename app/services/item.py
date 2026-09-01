@@ -5,13 +5,25 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.analysis.base import ItemAnalyzer
+from app.answers.base import WardrobeAnswerer
+from app.answers.context import hits_to_context
 from app.core.config import settings
-from app.core.exceptions import EmbeddingError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AnswerError,
+    EmbeddingError,
+    NotFoundError,
+    ValidationError,
+)
 from app.embeddings.base import ItemEmbedder
 from app.embeddings.text import analysis_to_text
 from app.models.item import WardrobeItem
 from app.repositories.item import ItemRepository
 from app.schemas.analysis import ItemAnalysisResult
+from app.schemas.answer import (
+    AnswerPick,
+    ItemSearchResponse,
+    SearchAnswerItem,
+)
 from app.schemas.item import (
     ItemBase,
     ItemImageRead,
@@ -35,11 +47,13 @@ class ItemService:
         storage: ImageStorage,
         analyzer: ItemAnalyzer | None = None,
         embedder: ItemEmbedder | None = None,
+        answerer: WardrobeAnswerer | None = None,
     ) -> None:
         self.repo = repo
         self.storage = storage
         self.analyzer = analyzer
         self.embedder = embedder
+        self.answerer = answerer
 
     async def get_item(self, item_id: UUID) -> ItemRead:
         return self._to_read(await self._get_model(item_id))
@@ -50,13 +64,15 @@ class ItemService:
         items = await self.repo.list(limit=limit, offset=offset, category=category)
         return [self._to_read(item) for item in items]
 
-    async def search_items(
-        self, query: str, *, limit: int, offset: int
-    ) -> list[ItemSearchResult]:
+    async def search_items(self, query: str) -> list[ItemSearchResult]:
         """Rank items by how close their analysis sits to a natural-language query.
 
         The query is embedded with the same model that produced the stored
         vectors, so both live in one space.
+
+        Every embedded item comes back, ranked. There is no page size: a
+        similarity ranking is read from the top, and the answer path already
+        caps what it shows the model at `answer_context_items`.
 
         Unlike `_embed`, an embedding failure is not swallowed here: there the
         vector is a bonus on top of an analysis worth keeping, whereas here it
@@ -70,11 +86,72 @@ class ItemService:
             raise EmbeddingError("Search is unavailable: embeddings are disabled.")
 
         vector = await self.embedder.embed(text)
-        rows = await self.repo.search_by_embedding(vector, limit=limit, offset=offset)
+        rows = await self.repo.search_by_embedding(vector)
         return [
             ItemSearchResult(score=1.0 - distance, item=self._to_read(item))
             for item, distance in rows
         ]
+
+    async def answer_search(self, query: str) -> ItemSearchResponse:
+        """Search, then have the model answer *from those results only*.
+
+        Retrieval runs first, so the answer can never reach past what the
+        wardrobe actually holds. The model sees the top `answer_context_items`
+        hits and cites them by position.
+
+        Only the items it picked are returned. Retrieval always yields its
+        closest rows whether or not they answer the question, so the unfiltered
+        ranking is a poor thing to put on screen — the model's job here is to
+        decide which of those rows are worth showing, and to say why.
+        """
+        results = await self.search_items(query)
+        if self.answerer is None:
+            raise AnswerError("Answers are unavailable: answering is disabled.")
+
+        # Only this window is described to the model, so only it can be cited.
+        window = results[: settings.answer_context_items]
+        draft = await self.answerer.answer(query.strip(), hits_to_context(window))
+        return ItemSearchResponse(
+            answer=draft.answer,
+            has_match=draft.has_match,
+            items=self._resolve_picks(draft.picks, window),
+        )
+
+    def _resolve_picks(
+        self, picks: Sequence[AnswerPick], window: Sequence[ItemSearchResult]
+    ) -> list[SearchAnswerItem]:
+        """Turn the model's 1-based positions back into real items.
+
+        Anything outside the window is dropped rather than trusted: this is the
+        last point where a made-up reference could still become a real id in the
+        response, and a pick nobody retrieved is exactly the hallucination the
+        grounding exists to prevent.
+
+        Everything but `reason` is read off the retrieved item, so the title and
+        image on a card are the wardrobe's own, never the model's recollection
+        of them.
+        """
+        resolved: list[SearchAnswerItem] = []
+        for pick in picks:
+            if not 1 <= pick.index <= len(window):
+                logger.warning(
+                    "answer cited item %d outside the %d retrieved; dropped",
+                    pick.index,
+                    len(window),
+                )
+                continue
+            item = window[pick.index - 1].item
+            resolved.append(
+                SearchAnswerItem(
+                    item_id=item.id,
+                    title=item.analysis.title if item.analysis else None,
+                    # The first image is the one the card shows. `images` comes
+                    # back ordered by `position`, so this is the primary shot.
+                    image_url=item.images[0].url if item.images else None,
+                    reason=pick.reason,
+                )
+            )
+        return resolved
 
     async def create_item(self, images: Sequence[ImageUpload]) -> ItemRead:
         """Create an item from its images. Its details start out null."""

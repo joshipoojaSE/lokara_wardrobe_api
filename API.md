@@ -43,6 +43,12 @@ Every error shares one shape:
 | 409 | `conflict` | defined in `app/core/exceptions.py`, not yet raised anywhere |
 | 422 | `validation_error` | body, query, or path validation failed, or an upload was rejected |
 | 500 | `internal_error` | unhandled `AppError` |
+| 502 | `embedding_failed` | the search query could not be embedded — `GET /items/search` only |
+| 502 | `answer_failed` | the answering model failed — `GET /items/search` only |
+
+`analysis_failed` exists but never reaches a response: vision analysis runs in the background, so a
+failure is recorded on the item as `analysis_status="failed"` instead. The two 502s above are the
+inverse — those models are called during the request, so their failures surface.
 
 > **Caveat:** a failure inside the session commit occurs after exception handlers have run, so it
 > escapes as a bare `500 Internal Server Error` **without** this envelope. See ARCHITECTURE.md.
@@ -54,7 +60,7 @@ Every error shares one shape:
 | GET | `/api/v1/health` | 200 | no DB access |
 | POST | `/api/v1/items` | 201 | |
 | GET | `/api/v1/items` | 200 | bare array, no envelope |
-| GET | `/api/v1/items/search` | 200 | semantic search, ranked |
+| GET | `/api/v1/items/search` | 200 | semantic search + a written reply |
 | GET | `/api/v1/items/{item_id}` | 200 | |
 | PATCH | `/api/v1/items/{item_id}` | 200 | partial update |
 | DELETE | `/api/v1/items/{item_id}` | 204 | empty body |
@@ -195,40 +201,66 @@ An empty result is `[]` with **200**, never 404.
 
 ### `GET /items/search`
 
-Finds items by meaning rather than by exact field match: the query is embedded with the same model
-that produced each item's stored analysis vector, and results come back nearest-first.
+Ask about the wardrobe in plain language and get a styled reply plus the items behind it.
+
+Two steps per request. The query is embedded with the same model that produced each item's stored
+analysis vector and compared against them, so "something in green" reaches a mint tee whether or not
+the words line up. The closest hits are then described to a language model, which decides which are
+actually worth showing and writes the `reason` on each one.
 
 | Param | Type | Default | Constraints |
 |---|---|---|---|
 | `q` | string | — | required, ≥ 1 char (blank or whitespace-only → 422) |
-| `limit` | integer | 20 | 1–100 (outside → 422) |
-| `offset` | integer | 0 | ≥ 0 |
 
 ```
-GET /api/v1/items/search?q=I%20want%20a%20red%20tshirt&limit=20
+GET /api/v1/items/search?q=i%20want%20to%20wear%20something%20in%20green
 ```
-
-A **bare JSON array** again, but of a different shape than `GET /items` — each entry wraps an
-`ItemRead` alongside its similarity, so the score never leaks into the plain item endpoints:
 
 ```json
-[
-  {"score": 0.87, "item": {"id": "...", "images": ["..."], "analysis": {"...": "..."}}},
-  {"score": 0.61, "item": {"...": "..."}}
-]
+{
+  "answer": "You don't own anything properly green. The closest is your mint pineapple t-shirt, whose teal body carries a small green patch.",
+  "has_match": false,
+  "items": [
+    {
+      "item_id": "e954e2fb-ba8f-4712-992e-24a177148cfb",
+      "title": "Mint Pineapple Patch T-shirt",
+      "image_url": "https://lokara-restart.s3.ap-south-1.amazonaws.com/items/...?X-Amz-Signature=...",
+      "reason": "Mint teal with a green embroidered patch — the nearest thing to green you own."
+    }
+  ]
+}
 ```
 
-`score` is `1 - cosine distance`: `1.0` is an exact match, and it decreases with distance. It is a
-relative ranking signal, not a probability — do not read `0.5` as "50% relevant".
+**`has_match` is the field that matters.** Similarity search always returns its closest rows, so a
+result is not evidence of a match. `false` means the wardrobe does not actually contain what was
+asked for and the reply is offering the nearest thing instead — render it as a miss, not a hit.
 
-**Only items whose analysis is `ready` *and* carries an embedding can match.** Items still `pending`,
-`failed` or `skipped` have no analysis row, and an analysis whose embedding call failed stored a null
-vector; both are excluded rather than ranked last. An item that never appears in results is usually
-missing a vector, not badly matched — `scripts/backfill_embeddings.py` fills those in.
+**`items` is only what the model picked**, best first — not the raw ranking. It is usually one to
+three entries and may be empty, with `answer` explaining why. Each entry is a result card and nothing
+more: `title` and `image_url` are read off the item itself (never the model's recollection of it),
+and `image_url` is the item's first image, presigned at read time, so it expires. For the full
+record — every analysis field, every image — call `GET /items/{item_id}` with the `item_id`.
 
-An empty result is `[]` with **200**. **502** `embedding_failed` if the embedding model cannot be
-reached — the query could not be embedded, so no ranking exists, and this is deliberately *not*
-reported as an empty result.
+`item_id` can only ever name an item that was actually retrieved. The model cites items by
+**position** in the prompt, never by id, and the service maps positions back and drops anything
+outside the retrieved window. It is also instructed to describe items only with attributes present
+in their analysis. Grounding is enforced by construction for *which items* are named; the prose in
+`answer` and `reason` is model output, so treat it as advice rather than as a database read.
+
+**Only items whose analysis is `ready` *and* carries an embedding can be found.** Items still
+`pending`, `failed` or `skipped` have no analysis row, and an analysis whose embedding call failed
+stored a null vector; both are excluded rather than ranked last. An item that never turns up is
+usually missing a vector, not badly matched — `scripts/backfill_embeddings.py` fills those in.
+
+Retrieval itself is unpaginated: every embedded item is ranked, and the top `ANSWER_CONTEXT_ITEMS`
+(default 5) are what the model sees. `limit` and `offset` were removed; a client still sending them
+gets a normal answer rather than an error, since FastAPI ignores query parameters an endpoint does
+not declare.
+
+**502** `embedding_failed` if the embedding model cannot be reached — the query could not be
+embedded, so no ranking exists, and this is deliberately *not* reported as an empty result.
+**502** `answer_failed` if the answering model cannot be reached or replies unusably; a retrieval
+failure short-circuits first and the answering model is never called.
 
 ---
 

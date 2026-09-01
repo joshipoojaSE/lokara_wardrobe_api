@@ -52,6 +52,18 @@ class EmbeddingError(AppError):
     code = "embedding_failed"
 
 
+class AnswerError(AppError):
+    """The answering model could not be reached or answered unusably.
+
+    Raised, not swallowed: the caller asked for a grounded reply, and
+    returning the bare hits with the answer silently missing would look like the
+    model had nothing to say.
+    """
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "answer_failed"
+
+
 def _error(code: str, message: str, status_code: int, **extra: object) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
